@@ -1,0 +1,51 @@
+//! Tunables that were decided up front, gathered in one place.
+
+use std::path::PathBuf;
+
+/// A UUIDv7 is 16 bytes. An encoded payload smaller than that is cheaper to
+/// ship whole than to ship an id the receiver has to resolve, so the bus
+/// inlines it.
+pub const INLINE_MAX_BYTES: usize = 16;
+
+/// Per-session delivery queue. On overflow the session is handed a resync
+/// marker instead of blocking the bus.
+pub const SESSION_QUEUE: usize = 256;
+
+/// Reconnect replays at most this many events before falling back to a plain
+/// state read and reporting a gap.
+pub const REPLAY_EVENT_CAP: usize = 500;
+
+/// ...and never reaches further back than this.
+pub const REPLAY_AGE_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Consecutive messages from one author group under a single timestamp until
+/// this much time passes (or the day changes).
+pub const GROUP_GAP_MILLIS: i64 = 5 * 60 * 1000;
+
+/// How many messages a conversation view holds before older ones are dropped
+/// from memory and re-fetched on scroll.
+pub const MESSAGE_WINDOW: usize = 500;
+
+/// Bumped only if the on-disk postcard encoding of an event has to change
+/// shape incompatibly.
+pub const EVENT_SCHEMA_VERSION: i64 = 1;
+
+/// `$XDG_DATA_HOME/newbbs` (or `~/.local/share/newbbs`).
+pub fn data_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("newbbs");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".local/share/newbbs")
+}
+
+pub fn default_db_path() -> PathBuf {
+    data_dir().join("newbbs.db")
+}
+
+/// The TUI owns the terminal, so logs go to a file.
+pub fn log_dir() -> PathBuf {
+    data_dir().join("logs")
+}
