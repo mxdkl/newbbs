@@ -7,6 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
+use unicode_width::UnicodeWidthStr;
+
 use super::theme::Theme;
 use super::{App, Mode, Overlay, markdown};
 use crate::config;
@@ -17,8 +19,12 @@ const MEMBERS_WIDTH: u16 = 18;
 const TIME_WIDTH: usize = 5;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [body, status] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let [body, rule, status] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     let [sidebar, center, members] = Layout::horizontal([
         Constraint::Length(SIDEBAR_WIDTH),
         Constraint::Min(24),
@@ -29,6 +35,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_sidebar(frame, app, sidebar);
     draw_center(frame, app, center);
     draw_members(frame, app, members);
+    draw_rule(frame, app, rule);
     draw_status(frame, app, status);
 
     match &app.overlay {
@@ -430,50 +437,95 @@ fn member_row(app: &App, id: UserId) -> Line<'static> {
 // status line
 // ---------------------------------------------------------------------------
 
+/// The full-width rule that closes off the input box.
+fn draw_rule(frame: &mut Frame, app: &App, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "\u{2500}".repeat(area.width as usize),
+            Style::default().fg(app.theme.border(false)),
+        ))),
+        area,
+    );
+}
+
+/// The mode line: one solid block of the mode's colour with black text.
+///
+/// The three segments are positioned independently -- the mode name is flush
+/// left, the conversation is centred on the full bar, and anything transient is
+/// flush right. Centring on the bar rather than on the remaining space is what
+/// keeps the conversation still when NORMAL becomes COMMAND.
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
-    let (label, color) = match app.mode {
-        Mode::Normal => (" NORMAL ", theme.accent()),
-        Mode::Insert => (" INSERT ", theme.color(theme.palette.ok)),
-        Mode::Command => (" COMMAND ", theme.color(theme.palette.warn)),
+    // A refused command takes the bar over for a beat -- red, and saying so,
+    // rather than a red bar still claiming to be in normal mode. The
+    // conversation is centred on the whole bar, so the shorter word does not
+    // shift it.
+    let (label, color) = if app.flashing() {
+        ("ERROR", theme.bar_color(theme.palette.mode_error))
+    } else {
+        match app.mode {
+            Mode::Normal => ("NORMAL", theme.bar_color(theme.palette.mode_normal)),
+            Mode::Insert => ("INSERT", theme.bar_color(theme.palette.mode_insert)),
+            Mode::Command => ("COMMAND", theme.bar_color(theme.palette.mode_command)),
+        }
     };
-    let mut spans = vec![Span::styled(
-        label,
+    // The mono theme has no colour to fill with, so it inverts instead --
+    // still a solid bar, still readable on any terminal.
+    let bar = if theme.mono {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
         Style::default()
-            .fg(theme.color(0x1b1d23))
             .bg(color)
-            .add_modifier(Modifier::BOLD),
-    )];
+            .fg(theme.bar_color(theme.palette.bar_fg))
+    };
+    // Nothing on this bar is bold. A console renders bold as "intensify",
+    // which promotes black to colour 8 -- grey. Depth detection cannot catch
+    // that: inside tmux the app is told it has a 256-colour terminal while the
+    // real one is a 16-colour console, and the bold is passed straight
+    // through. The bar is a solid block of colour and needs no help standing
+    // out, so it simply never asks for bold.
+    let plain = Style::default();
+
     let online = app
         .members
         .iter()
         .filter(|id| app.user(**id).is_some_and(|u| u.online))
         .count();
-    spans.push(Span::styled(
-        format!(
-            "  {}  \u{b7}  {online} online",
-            app.active_conv()
-                .map(|c| app.label(c.id).to_string())
-                .unwrap_or_default()
+    let centre = match app.active_conv() {
+        Some(conv) => format!("{}  \u{b7}  {online} online", app.label(conv.id)),
+        None => String::new(),
+    };
+    let right = match (&app.status, app.scroll) {
+        (Some(status), _) => status.clone(),
+        (None, 0) => String::new(),
+        (None, scroll) => format!(
+            "scrolled {scroll} line{}",
+            if scroll == 1 { "" } else { "s" }
         ),
-        Style::default().fg(theme.dim()),
-    ));
-    if let Some(status) = &app.status {
-        spans.push(Span::styled(
-            format!("  \u{b7}  {status}"),
-            Style::default().fg(theme.color(theme.palette.warn)),
-        ));
-    } else if app.scroll > 0 {
-        spans.push(Span::styled(
-            format!(
-                "  \u{b7}  scrolled {} line{}",
-                app.scroll,
-                if app.scroll == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(theme.dim()),
-        ));
+    };
+
+    let total = area.width as usize;
+    let mut spans = vec![Span::styled(label, plain)];
+    let mut used = label.width();
+
+    let centre_start = total.saturating_sub(centre.width()) / 2;
+    if !centre.is_empty() {
+        // On a narrow bar the segments would collide; fall back to a single
+        // space rather than letting them overlap.
+        let gap = centre_start.saturating_sub(used).max(1);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(centre.clone(), plain));
+        used += gap + centre.width();
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    if !right.is_empty() && total.saturating_sub(used) > 2 {
+        let right = truncate(&right, total - used - 1);
+        let gap = total.saturating_sub(used + right.width()).max(1);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(right, plain));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
 }
 
 // ---------------------------------------------------------------------------

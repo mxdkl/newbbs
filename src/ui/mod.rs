@@ -56,6 +56,8 @@ pub struct App {
     pub cursor: usize,
     pub command: String,
     pub status: Option<String>,
+    /// While this is in the future the bar flashes red -- a refused command.
+    pub flash_until: Option<std::time::Instant>,
     /// Lines scrolled back from the bottom of the conversation.
     pub scroll: usize,
     /// A half-typed multi-key sequence, e.g. the first `g` of `gg`.
@@ -72,10 +74,49 @@ pub struct App {
 
 pub async fn run(bus: Bus, me: UserId) -> Result<()> {
     let mut app = App::new(bus, me).await?;
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     let result = app.event_loop(&mut terminal).await;
-    ratatui::restore();
+    restore_terminal();
     result
+}
+
+/// Like `ratatui::init`, plus one thing it does not do: turn off line wrap.
+///
+/// With wrap on, writing the bottom-right cell makes the terminal scroll a
+/// line, which shunts the whole screen up and tramples whatever sits below --
+/// a tmux status line, for instance. Nothing wrote that cell until the status
+/// bar gained a background, because unstyled trailing spaces never made it
+/// into the diff.
+fn init_terminal() -> Result<ratatui::DefaultTerminal> {
+    use crossterm::terminal::{DisableLineWrap, EnterAlternateScreen, enable_raw_mode};
+
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        hook(info);
+    }));
+
+    enable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen, DisableLineWrap)?;
+    Ok(ratatui::Terminal::new(
+        ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+    )?)
+}
+
+fn restore_terminal() {
+    use crossterm::terminal::{EnableLineWrap, LeaveAlternateScreen, disable_raw_mode};
+
+    // Raw mode goes first: it has the wider side effects. ResetColor before
+    // leaving the alternate screen so no colour of ours survives into whatever
+    // repaints the terminal afterwards.
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::ResetColor,
+        EnableLineWrap,
+        LeaveAlternateScreen,
+        crossterm::style::ResetColor,
+    );
 }
 
 impl App {
@@ -95,6 +136,7 @@ impl App {
             cursor: 0,
             command: String::new(),
             status: None,
+            flash_until: None,
             scroll: 0,
             pending: None,
             overlay: None,
@@ -206,6 +248,18 @@ impl App {
 
     pub fn set_status(&mut self, text: impl Into<String>) {
         self.status = Some(text.into());
+        self.flash_until = None;
+    }
+
+    /// A refused command: same message, but the bar goes red for a beat.
+    pub fn set_error(&mut self, text: impl Into<String>) {
+        self.status = Some(text.into());
+        self.flash_until = Some(std::time::Instant::now() + config::ERROR_FLASH);
+    }
+
+    pub fn flashing(&self) -> bool {
+        self.flash_until
+            .is_some_and(|until| until > std::time::Instant::now())
     }
 
     /// Select a conversation by index and retarget the subscription.
@@ -240,7 +294,7 @@ impl App {
             return Ok(());
         }
         let Some(conv) = self.active_conv().map(|c| c.id) else {
-            self.set_status("no conversation selected");
+            self.set_error("no conversation selected");
             return Ok(());
         };
         self.bus
@@ -279,6 +333,7 @@ impl App {
                     Some(delivery) => self.on_delivery(delivery).await?,
                     None => break,
                 },
+                () = expire(self.flash_until) => self.flash_until = None,
             }
         }
         Ok(())
@@ -361,6 +416,16 @@ impl App {
     }
 }
 
+/// Completes when the flash is due to end, or never if nothing is flashing.
+async fn expire(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(until) => {
+            tokio::time::sleep(until.saturating_duration_since(std::time::Instant::now())).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// crossterm's reader is blocking, so it lives on its own thread and feeds the
 /// async loop through a channel.
 fn spawn_input_reader() -> mpsc::UnboundedReceiver<crossterm::event::Event> {
@@ -422,4 +487,102 @@ pub async fn snapshot(
         out.push('\n');
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render the bottom row of the status bar in one mode.
+    async fn status_row(app: &mut App, mode: Mode) -> String {
+        app.mode = mode;
+        let backend = ratatui::backend::TestBackend::new(90, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let frame = terminal.draw(|frame| render::draw(frame, app)).unwrap();
+        let y = frame.area.height - 1;
+        (0..frame.area.width)
+            .map(|x| frame.buffer.cell((x, y)).unwrap().symbol())
+            .collect()
+    }
+
+    /// A refused command paints the bar red until the flash lapses, without
+    /// disturbing anything else on it.
+    #[tokio::test]
+    async fn a_refused_command_flashes_the_bar_red() {
+        let path = std::env::temp_dir().join(format!("newbbs-flash-{}.db", uuid::Uuid::now_v7()));
+        let (bus, _owner) = Bus::start(path.clone()).unwrap();
+        let me = bus.user_by_name("admin").await.unwrap().unwrap().id;
+        let mut app = App::new(bus.clone(), me).await.unwrap();
+
+        let (calm, label) = bar(&mut app).await;
+        assert_eq!(calm, app.theme.bar_color(app.theme.palette.mode_normal));
+        assert!(label.starts_with("NORMAL"), "got {label:?}");
+
+        app.set_error("unknown command :nonsense -- try :help");
+        assert!(app.flashing());
+        let (angry, label) = bar(&mut app).await;
+        assert_eq!(angry, app.theme.bar_color(app.theme.palette.mode_error));
+        assert!(
+            label.starts_with("ERROR"),
+            "a red bar should not still claim to be in normal mode, got {label:?}"
+        );
+
+        // Once the flash lapses the bar goes back on its own, with no keypress.
+        app.flash_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!app.flashing());
+        let (settled, label) = bar(&mut app).await;
+        assert_eq!(settled, calm);
+        assert!(label.starts_with("NORMAL"), "got {label:?}");
+
+        bus.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The status bar's background colour and its text.
+    async fn bar(app: &mut App) -> (ratatui::style::Color, String) {
+        let backend = ratatui::backend::TestBackend::new(90, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let frame = terminal.draw(|frame| render::draw(frame, app)).unwrap();
+        let y = frame.area.height - 1;
+        let text = (0..frame.area.width)
+            .map(|x| frame.buffer.cell((x, y)).unwrap().symbol())
+            .collect();
+        (frame.buffer.cell((0, y)).unwrap().bg, text)
+    }
+
+    /// The mode name is flush left, and the conversation is centred on the bar
+    /// rather than on what is left of it -- so COMMAND being a letter longer
+    /// than NORMAL does not shove the conversation sideways.
+    #[tokio::test]
+    async fn the_conversation_does_not_move_when_the_mode_changes() {
+        let path = std::env::temp_dir().join(format!("newbbs-ui-{}.db", uuid::Uuid::now_v7()));
+        let (bus, _owner) = Bus::start(path.clone()).unwrap();
+        let me = bus.user_by_name("admin").await.unwrap().unwrap().id;
+        let mut app = App::new(bus.clone(), me).await.unwrap();
+
+        let mut centres = Vec::new();
+        for (mode, label) in [
+            (Mode::Normal, "NORMAL"),
+            (Mode::Insert, "INSERT"),
+            (Mode::Command, "COMMAND"),
+        ] {
+            let row = status_row(&mut app, mode).await;
+            assert!(
+                row.starts_with(label),
+                "{label} should sit in the first column, got {row:?}"
+            );
+            centres.push(row.find('#').expect("the conversation name"));
+        }
+        assert_eq!(
+            centres[0], centres[1],
+            "the conversation moved between NORMAL and INSERT"
+        );
+        assert_eq!(
+            centres[0], centres[2],
+            "the conversation moved between NORMAL and COMMAND"
+        );
+
+        bus.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
 }

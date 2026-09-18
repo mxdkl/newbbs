@@ -162,7 +162,12 @@ async fn command_line(app: &mut App, key: KeyEvent, sub: &Subscription) -> Resul
         KeyCode::Enter => {
             let line = std::mem::take(&mut app.command);
             app.mode = Mode::Normal;
-            command::run(app, &line, sub).await?;
+            // A command that fails is the user's problem to see, not a reason
+            // to tear the session down.
+            if let Err(err) = command::run(app, &line, sub).await {
+                tracing::error!(%err, command = %line, "command failed");
+                app.set_error(format!("{err}"));
+            }
         }
         KeyCode::Backspace => {
             if app.command.pop().is_none() {

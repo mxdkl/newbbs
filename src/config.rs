@@ -26,6 +26,9 @@ pub const GROUP_GAP_MILLIS: i64 = 5 * 60 * 1000;
 /// from memory and re-fetched on scroll.
 pub const MESSAGE_WINDOW: usize = 500;
 
+/// How long the status bar flashes red after a command is refused.
+pub const ERROR_FLASH: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// Bumped only if the on-disk postcard encoding of an event has to change
 /// shape incompatibly.
 pub const EVENT_SCHEMA_VERSION: i64 = 1;

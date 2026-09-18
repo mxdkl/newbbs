@@ -6,7 +6,6 @@
 //! unset wherever possible so the terminal's own theme shows through.
 
 use ratatui::style::Color;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Truecolor,
@@ -35,6 +34,14 @@ pub struct Palette {
     pub dim: u32,
     pub border: u32,
     pub border_focus: u32,
+    /// The status bar takes the current mode's colour. These are deliberately
+    /// light in every theme, because the text on them is pure black.
+    pub mode_normal: u32,
+    pub mode_insert: u32,
+    pub mode_command: u32,
+    /// Flashed on the bar when a command is refused.
+    pub mode_error: u32,
+    pub bar_fg: u32,
     pub accent: u32,
     pub selection: u32,
     pub ok: u32,
@@ -48,6 +55,11 @@ pub const DARK: Palette = Palette {
     dim: 0x6b7280,
     border: 0x3b4048,
     border_focus: 0x61afef,
+    mode_normal: 0x61afef,
+    mode_insert: 0x98c379,
+    mode_command: 0xe5c07b,
+    mode_error: 0xe06c75,
+    bar_fg: 0x000000,
     accent: 0x61afef,
     selection: 0x2c323c,
     ok: 0x98c379,
@@ -61,6 +73,11 @@ pub const LIGHT: Palette = Palette {
     dim: 0x6e7781,
     border: 0xd0d7de,
     border_focus: 0x0969da,
+    mode_normal: 0x61afef,
+    mode_insert: 0x98c379,
+    mode_command: 0xe5c07b,
+    mode_error: 0xe06c75,
+    bar_fg: 0x000000,
     accent: 0x0969da,
     selection: 0xeaeef2,
     ok: 0x1a7f37,
@@ -137,6 +154,27 @@ impl Theme {
     pub fn selection(&self) -> Color {
         self.color(self.palette.selection)
     }
+
+    /// A background for the status bar, picked to survive a degradation we
+    /// cannot see.
+    ///
+    /// Inside tmux the app is told it has 256 colours even when the real
+    /// terminal has 16, and tmux maps our cube blue down to ANSI 4 -- dark
+    /// blue, 1.6:1 against the black text. Indices 0-15 pass through tmux
+    /// untouched, so anywhere short of truecolor the bar uses the bright ANSI
+    /// slot instead and stays readable.
+    pub fn bar_color(&self, rgb: u32) -> Color {
+        if self.mono {
+            return Color::Reset;
+        }
+        match self.depth {
+            Depth::Truecolor => self.color(rgb),
+            _ => {
+                let (r, g, b) = unpack(rgb);
+                Color::Indexed(to_16(r, g, b))
+            }
+        }
+    }
 }
 
 fn unpack(rgb: u32) -> (u8, u8, u8) {
@@ -179,41 +217,40 @@ fn to_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * q(r) + 6 * q(g) + q(b)
 }
 
-/// The 16 ANSI colours, as most terminals render them. Used only to pick the
-/// nearest index -- the terminal's own palette decides what is actually drawn,
-/// which is what we want on a console themed by its owner.
-const ANSI16: [(u8, u8, u8); 16] = [
-    (0x00, 0x00, 0x00),
-    (0xaa, 0x00, 0x00),
-    (0x00, 0xaa, 0x00),
-    (0xaa, 0x55, 0x00),
-    (0x00, 0x00, 0xaa),
-    (0xaa, 0x00, 0xaa),
-    (0x00, 0xaa, 0xaa),
-    (0xaa, 0xaa, 0xaa),
-    (0x55, 0x55, 0x55),
-    (0xff, 0x55, 0x55),
-    (0x55, 0xff, 0x55),
-    (0xff, 0xff, 0x55),
-    (0x55, 0x55, 0xff),
-    (0xff, 0x55, 0xff),
-    (0x55, 0xff, 0xff),
-    (0xff, 0xff, 0xff),
-];
-
 fn to_16(r: u8, g: u8, b: u8) -> u8 {
-    let mut best = 7u8;
-    let mut best_d = i32::MAX;
-    for (i, (cr, cg, cb)) in ANSI16.iter().enumerate() {
-        // Weighted to match perceived brightness rather than raw distance.
-        let dr = r as i32 - *cr as i32;
-        let dg = g as i32 - *cg as i32;
-        let db = b as i32 - *cb as i32;
-        let d = 2 * dr * dr + 4 * dg * dg + 3 * db * db;
-        if d < best_d {
-            best_d = d;
-            best = i as u8;
-        }
+    let max = r.max(g).max(b) as i32;
+    let min = r.min(g).min(b) as i32;
+    let chroma = max - min;
+
+    // Near-grey: pick a rung of the black/grey/white ramp.
+    if chroma < 32 {
+        return match max {
+            0..40 => 0,
+            40..128 => 8,
+            128..200 => 7,
+            _ => 15,
+        };
     }
-    best
+
+    // Otherwise pick by hue, so a pastel keeps its identity instead of being
+    // averaged into grey, and brighten it if the colour is light.
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    let chroma = chroma as f32;
+    let hue = if max == r {
+        60.0 * (((g - b) as f32 / chroma) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) as f32 / chroma + 2.0)
+    } else {
+        60.0 * ((r - g) as f32 / chroma + 4.0)
+    };
+    let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+    let base = match hue as i32 {
+        30..90 => 3,    // yellow
+        90..150 => 2,   // green
+        150..210 => 6,  // cyan
+        210..270 => 4,  // blue
+        270..330 => 5,  // magenta
+        _ => 1,         // red
+    };
+    if max >= 160 { base + 8 } else { base }
 }
