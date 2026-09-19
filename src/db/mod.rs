@@ -6,8 +6,8 @@
 //! Everything here is synchronous and single-owner -- the bus task is the only
 //! thing that touches a [`Db`].
 
+mod bootstrap;
 mod migrations;
-mod seed;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -61,9 +61,9 @@ impl Db {
         self.commit_at(actor, kind, now_millis())
     }
 
-    /// As [`Db::commit`], but with an explicit timestamp -- used by seeding to
-    /// backdate history. The uuid is v7 derived from `at`, so a backdated event
-    /// still sorts into the right place in the log.
+    /// As [`Db::commit`], but with an explicit timestamp. Bootstrapping uses
+    /// it to give each of its events a distinct millisecond. The uuid is v7
+    /// derived from `at`, so the log still sorts by time.
     pub fn commit_at(
         &mut self,
         actor: Option<UserId>,
@@ -490,7 +490,7 @@ fn apply_projection(tx: &rusqlite::Transaction<'_>, event: &Event) -> Result<()>
 // ---------------------------------------------------------------------------
 
 /// A UUIDv7 whose embedded timestamp is `at`, so ordering by id is ordering by
-/// time even for backdated (seeded) events.
+/// time even for events given an explicit timestamp.
 fn uuid_at(at: Millis) -> Uuid {
     let secs = at.div_euclid(1000) as u64;
     let nanos = (at.rem_euclid(1000) * 1_000_000) as u32;
@@ -598,4 +598,4 @@ fn row_to_conv(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
     })
 }
 
-pub use seed::seed_demo;
+pub use bootstrap::{ADMIN_NAME, bootstrap};

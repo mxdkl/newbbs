@@ -41,7 +41,10 @@ const HOST_KEY_SETTING: &str = "ssh.host_key";
 const ENTER_SCREEN: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?25l";
 const LEAVE_SCREEN: &[u8] = b"\x1b[?25h\x1b[?7h\x1b[?1049l\x1b[0m";
 
-pub async fn serve(bus: Bus, listen: SocketAddr) -> Result<()> {
+/// `announce` prints the banner for a human watching the terminal. It must be
+/// off when a local `--ui` session is attached: this runs in its own task, so
+/// the text would land on top of the TUI that is drawing at the same time.
+pub async fn serve(bus: Bus, listen: SocketAddr, announce: bool) -> Result<()> {
     let host_key = host_key(&bus).await?;
     let fingerprint = host_key.public_key().fingerprint(HashAlg::Sha256);
 
@@ -61,9 +64,11 @@ pub async fn serve(bus: Bus, listen: SocketAddr) -> Result<()> {
         sessions: Arc::new(Sessions::default()),
     };
     tracing::info!(%listen, %fingerprint, "ssh listener started");
-    eprintln!("newbbs listening on {listen}");
-    eprintln!("  host key {fingerprint}");
-    eprintln!("  connect with: ssh -p {} {LOGIN_NAME}@<host>", listen.port());
+    if announce {
+        eprintln!("newbbs listening on {listen}");
+        eprintln!("  host key {fingerprint}");
+        eprintln!("  connect with: ssh -p {} {LOGIN_NAME}@<host>", listen.port());
+    }
     server
         .run_on_address(config, listen)
         .await

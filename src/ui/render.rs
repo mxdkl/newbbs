@@ -239,7 +239,7 @@ fn build_messages(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  nothing here yet -- press i and say something",
+            "  no messages yet",
             dim,
         )));
     }

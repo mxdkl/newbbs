@@ -1,0 +1,25 @@
+services:
+  newbbs:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/newbbs:latest
+    container_name: newbbs
+    # The host key lives in the database, so losing this volume means every
+    # client gets a host-key-changed warning on their next connection.
+    volumes:
+      - newbbs-data:/var/lib/newbbs
+    ports:
+      - "2222:2222"
+    # Rootless podman's default networking. Without this, compose creates its
+    # own network, which needs netavark and ip_tables -- unavailable to a
+    # rootless user on a host that won't let it load the module.
+    network_mode: pasta
+    restart: unless-stopped
+
+volumes:
+  newbbs-data:
+    # Pin the name: compose would otherwise prefix it with the project name and
+    # quietly use a different volume than the plain `podman run` commands, so
+    # switching between the two would look like the board had been wiped.
+    name: newbbs-data

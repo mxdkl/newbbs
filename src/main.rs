@@ -65,16 +65,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = cli.db.clone().unwrap_or_else(config::default_db_path);
 
-    // The TUI owns the terminal, so logs go to a file either way.
-    let log_dir = config::log_dir();
-    std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
-    let appender = tracing_appender::rolling::daily(&log_dir, "newbbs.log");
-    let (writer, _guard) = tracing_appender::non_blocking(appender);
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_writer(writer)
-        .with_ansi(false)
-        .init();
+    let _log_guard = init_logging(&cli.command)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -93,13 +84,43 @@ fn main() -> Result<()> {
     })
 }
 
+/// Logs go to stderr, where `podman logs` and a terminal can both see them --
+/// except when `--ui` is attached, because the TUI owns the terminal and log
+/// lines would be drawn over it.
+fn init_logging(command: &Command) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    let filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+    let owns_terminal = matches!(command, Command::Serve { ui: true, .. });
+
+    if !owns_terminal {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_writer(std::io::stderr)
+            .init();
+        return Ok(None);
+    }
+
+    let log_dir = config::log_dir();
+    std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    let appender = tracing_appender::rolling::daily(&log_dir, "newbbs.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    tracing_subscriber::fmt()
+        .with_env_filter(filter())
+        .with_writer(writer)
+        .with_ansi(false)
+        .init();
+    eprintln!("logging to {}", log_dir.display());
+    Ok(Some(guard))
+}
+
 async fn serve(db_path: PathBuf, listen: SocketAddr, with_ui: bool) -> Result<()> {
     let (bus, owner) = bus::Bus::start(db_path)?;
-    let admin = ensure_seeded(&bus).await?;
+    let admin = admin_account(&bus).await?;
 
     let listener = tokio::spawn({
         let bus = bus.clone();
-        async move { ssh::serve(bus, listen).await }
+        async move { ssh::serve(bus, listen, !with_ui).await }
     });
 
     let result = if with_ui {
@@ -142,7 +163,7 @@ async fn snapshot(
     overlay: Option<String>,
 ) -> Result<()> {
     let (bus, owner) = bus::Bus::start(db_path)?;
-    let admin = ensure_seeded(&bus).await?;
+    let admin = admin_account(&bus).await?;
     let text = ui::snapshot(bus.clone(), admin, width, height, overlay.as_deref()).await?;
     print!("{text}");
     bus.shutdown();
@@ -170,11 +191,11 @@ async fn dump_log(db_path: PathBuf, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// The account the local `--ui` session logs in as. The bus seeds demo content
-/// into an empty database on startup, so this is always present.
-async fn ensure_seeded(bus: &bus::Bus) -> Result<model::UserId> {
-    match bus.user_by_name("admin").await? {
+/// The account the local `--ui` session attaches as. The bus bootstraps an
+/// empty database on startup, so this is always present.
+async fn admin_account(bus: &bus::Bus) -> Result<model::UserId> {
+    match bus.user_by_name(db::ADMIN_NAME).await? {
         Some(admin) => Ok(admin.id),
-        None => anyhow::bail!("no admin account in this database"),
+        None => anyhow::bail!("no {} account in this database", db::ADMIN_NAME),
     }
 }

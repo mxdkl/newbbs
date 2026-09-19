@@ -138,9 +138,9 @@ impl Bus {
     /// (rusqlite is synchronous, and serialising access is the point).
     pub fn start(db_path: PathBuf) -> Result<(Bus, tokio::task::JoinHandle<()>)> {
         let mut db = Db::open(&db_path)?;
-        // A fresh database gets demo content before anyone can observe it.
+        // A fresh database gets the bare minimum before anyone can observe it.
         if db.is_empty()? {
-            crate::db::seed_demo(&mut db)?;
+            crate::db::bootstrap(&mut db)?;
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::task::spawn_blocking(move || {
@@ -595,7 +595,7 @@ mod tests {
             .conversation_by_name("general")
             .await
             .unwrap()
-            .expect("seeded channel");
+            .expect("#general exists on every board");
         let mut sub = bus
             .subscribe(None, vec![Tag::Conv(general.id)])
             .await
@@ -648,7 +648,19 @@ mod tests {
         let (bus, _owner) = Bus::start(path.clone()).unwrap();
         let admin = bus.user_by_name("admin").await.unwrap().unwrap();
         let general = bus.conversation_by_name("general").await.unwrap().unwrap();
-        let dev = bus.conversation_by_name("dev").await.unwrap().unwrap();
+        // A second channel of our own, rather than relying on whatever
+        // happens to exist on a fresh board.
+        let elsewhere = bus.alloc("conv").await.unwrap();
+        bus.commit(
+            Some(admin.id),
+            EventKind::ConvCreated {
+                conv: elsewhere,
+                kind: ConvKind::Channel,
+                name: "elsewhere".into(),
+            },
+        )
+        .await
+        .unwrap();
         let mut sub = bus
             .subscribe(None, vec![Tag::Conv(general.id)])
             .await
@@ -657,7 +669,7 @@ mod tests {
         bus.commit(
             Some(admin.id),
             EventKind::MessageSent {
-                conv: dev.id,
+                conv: elsewhere,
                 author: admin.id,
                 body: "not for you".into(),
             },
