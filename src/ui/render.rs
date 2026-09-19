@@ -41,6 +41,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match &app.overlay {
         Some(Overlay::Switcher(_)) => draw_switcher(frame, app),
         Some(Overlay::Profile(user)) => draw_profile(frame, app, user),
+        Some(Overlay::Roles(roles)) => draw_roles(frame, app, roles),
         Some(Overlay::Help) => draw_help(frame, app),
         None => {}
     }
@@ -167,8 +168,16 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines = build_messages(app, area.width as usize);
+    // History that just arrived sits above the viewport: push the scroll down
+    // by however many lines it added so the reader stays on the same text.
+    if let Some(before) = app.anchor.take() {
+        app.scroll += lines.len().saturating_sub(before);
+    }
     app.total_lines = lines.len();
     app.view_height = area.height as usize;
+    // Clamping lives here because this is the only place that knows both
+    // numbers; key handling can move `scroll` freely and be corrected.
+    app.scroll = app.scroll.min(lines.len().saturating_sub(area.height as usize));
 
     let height = area.height as usize;
     let start = lines.len().saturating_sub(height + app.scroll);
@@ -671,6 +680,45 @@ fn draw_profile(frame: &mut Frame, app: &App, user: &User) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// What roles exist, so you know what there is to grant.
+fn draw_roles(frame: &mut Frame, app: &App, roles: &[Role]) {
+    let theme = &app.theme;
+    let area = centered(frame.area(), 52, roles.len() as u16 + 4);
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent()))
+        .padding(Padding::horizontal(1))
+        .title(" roles ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let dim = Style::default().fg(theme.dim());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{:<14}", "name"), dim),
+        Span::styled(format!("{:>8}  ", "priority"), dim),
+        Span::styled("flags", dim),
+    ])];
+    for role in roles {
+        let mut flags = Vec::new();
+        if role.hoisted {
+            flags.push("hoisted");
+        }
+        if role.admin {
+            flags.push("admin");
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<14}", role.name),
+                Style::default().fg(theme.color(role.color)),
+            ),
+            Span::styled(format!("{:>8}  ", role.priority), Style::default().fg(theme.fg())),
+            Span::styled(flags.join(", "), dim),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_help(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = centered(frame.area(), 62, 22);
@@ -713,12 +761,20 @@ fn draw_help(frame: &mut Frame, app: &App) {
     lines.push(Line::default());
     lines.push(Line::from(Span::styled("COMMANDS", head)));
     lines.push(row(":help", ":q  :reload  :theme <name>"));
-    lines.push(row(":info", ":nick <name>  :bio <text>"));
+    lines.push(row(":nick", ":nick <name>  :bio <text>"));
     lines.push(row(":dm", ":group <name> <user...>  :join #chan"));
-    lines.push(row(":topic", ":mkchan  :rmchan  (admin)"));
-    lines.push(row(":invite", ":invite <name> <ssh key>  (admin)"));
-    lines.push(row(":motd", "set the message on the splash  (admin)"));
-    lines.push(row(":mkrole", ":grant <user> <role>  :revoke  (admin)"));
+    lines.push(row(":info", ":info <name>  :topic <text>"));
+    // Admin commands are simply absent for everyone else.
+    if app.is_admin() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("ADMIN", head)));
+        lines.push(row(":invite", ":invite <name> <ssh key>"));
+        lines.push(row(":mkchan", ":mkchan <name>  :rmchan <name>"));
+        lines.push(row(":roles", ":mkrole <name> <#rrggbb> [priority] [hoist]"));
+        lines.push(row(":rmrole", ":rmrole <name>"));
+        lines.push(row(":grant", ":grant <user> <role>  :revoke <user> <role>"));
+        lines.push(row(":motd", "set the message on the splash"));
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }

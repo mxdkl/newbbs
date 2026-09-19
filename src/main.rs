@@ -4,6 +4,7 @@ mod bus;
 mod config;
 mod db;
 mod model;
+mod roles;
 mod ssh;
 mod ui;
 
@@ -31,10 +32,22 @@ enum Command {
         /// Address to listen on for ssh.
         #[arg(long, default_value = "0.0.0.0:2222", value_name = "ADDR")]
         listen: SocketAddr,
-
-        /// Also attach a TUI session on this terminal, as the admin account.
+    },
+    /// Attach a TUI session to the board as the admin account, without
+    /// starting an ssh listener.
+    ///
+    /// For running alongside a server that is already up. It reads and writes
+    /// the same database, so admin commands take effect -- but it has its own
+    /// event bus, so messages sent by connected users only appear after
+    /// `:reload`.
+    Console,
+    /// Give someone a role (or take it away with --revoke).
+    Grant {
+        name: String,
+        role: String,
+        /// Remove the role instead of granting it.
         #[arg(long)]
-        ui: bool,
+        revoke: bool,
     },
     /// Create an account bound to an ssh public key.
     Invite {
@@ -61,9 +74,10 @@ enum Command {
         #[arg(long, conflicts_with = "text")]
         reset: bool,
     },
-    /// Set the splash art from a file.
+    /// Set the splash art from a file, or from stdin with `-`.
     Art {
-        /// A UTF-8 text file, with or without ANSI colour codes.
+        /// A UTF-8 text file, with or without ANSI colour codes. `-` reads
+        /// stdin, so art can be piped in from outside a container.
         #[arg(required_unless_present = "reset")]
         file: Option<PathBuf>,
         /// Go back to the built-in art.
@@ -89,7 +103,9 @@ fn main() -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         match cli.command {
-            Command::Serve { listen, ui } => serve(db_path, listen, ui).await,
+            Command::Serve { listen } => serve(db_path, listen).await,
+            Command::Console => console(db_path).await,
+            Command::Grant { name, role, revoke } => grant(db_path, name, role, revoke).await,
             Command::Invite { name, key } => invite(db_path, name, key).await,
             Command::Snapshot {
                 width,
@@ -104,13 +120,13 @@ fn main() -> Result<()> {
 }
 
 /// Logs go to stderr, where `podman logs` and a terminal can both see them --
-/// except when `--ui` is attached, because the TUI owns the terminal and log
-/// lines would be drawn over it.
+/// except for `console`, because the TUI owns the terminal and log lines
+/// would be drawn over it.
 fn init_logging(command: &Command) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
     let filter = || {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
-    let owns_terminal = matches!(command, Command::Serve { ui: true, .. });
+    let owns_terminal = matches!(command, Command::Console);
 
     if !owns_terminal {
         tracing_subscriber::fmt()
@@ -133,30 +149,38 @@ fn init_logging(command: &Command) -> Result<Option<tracing_appender::non_blocki
     Ok(Some(guard))
 }
 
-async fn serve(db_path: PathBuf, listen: SocketAddr, with_ui: bool) -> Result<()> {
+async fn serve(db_path: PathBuf, listen: SocketAddr) -> Result<()> {
     let (bus, owner) = bus::Bus::start(db_path)?;
-    let admin = admin_account(&bus).await?;
-
-    let listener = tokio::spawn({
-        let bus = bus.clone();
-        async move { ssh::serve(bus, listen, !with_ui).await }
-    });
-
-    let result = if with_ui {
-        // The local session runs alongside the listener; when it quits, so
-        // does the server.
-        ui::run(bus.clone(), admin).await
-    } else {
-        // Nothing else to do here -- wait on the listener.
-        match listener.await {
-            Ok(result) => result,
-            Err(err) => Err(err.into()),
-        }
-    };
+    // Bind before anything else, so "address already in use" is reported
+    // plainly rather than from inside a spawned task.
+    let socket = ssh::bind(listen).await?;
+    let result = ssh::serve(bus.clone(), socket).await;
 
     bus.shutdown();
     let _ = owner.await;
     result
+}
+
+/// A TUI session with no listener, for administering a board that is already
+/// being served by another process.
+async fn console(db_path: PathBuf) -> Result<()> {
+    let (bus, owner) = bus::Bus::start(db_path)?;
+    let admin = admin_account(&bus).await?;
+    let result = ui::run(bus.clone(), admin).await;
+    bus.shutdown();
+    let _ = owner.await;
+    result
+}
+
+async fn grant(db_path: PathBuf, name: String, role: String, revoke: bool) -> Result<()> {
+    let (bus, owner) = bus::Bus::start(db_path)?;
+    // No admin check: reaching this command already means shell access to the
+    // machine the board runs on.
+    let result = roles::grant(&bus, None, &name, &role, !revoke).await;
+    bus.shutdown();
+    let _ = owner.await;
+    println!("{}", result?);
+    Ok(())
 }
 
 async fn invite(db_path: PathBuf, name: String, key: String) -> Result<()> {
@@ -228,8 +252,14 @@ async fn art(db_path: PathBuf, file: Option<PathBuf>, reset: bool) -> Result<()>
         return Ok(());
     }
     let file = file.expect("clap requires a file unless --reset");
-    let art = std::fs::read_to_string(&file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let art = if file == std::path::Path::new("-") {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+            .context("reading art from stdin")?;
+        buffer
+    } else {
+        std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?
+    };
     // Trailing newlines would push the block off centre.
     let art = art.trim_end_matches('\n').to_string();
     let (bus, owner) = bus::Bus::start(db_path)?;
@@ -242,7 +272,11 @@ async fn art(db_path: PathBuf, file: Option<PathBuf>, reset: bool) -> Result<()>
     let parsed = ui::art_summary(&art);
     println!(
         "splash art set from {} ({} lines, {} columns{})",
-        file.display(),
+        if file == std::path::Path::new("-") {
+            "stdin".to_string()
+        } else {
+            file.display().to_string()
+        },
         art.lines().count(),
         parsed.0,
         if parsed.1 { ", coloured" } else { "" }
@@ -276,8 +310,8 @@ async fn dump_log(db_path: PathBuf, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// The account the local `--ui` session attaches as. The bus bootstraps an
-/// empty database on startup, so this is always present.
+/// The account `console` attaches as. The bus bootstraps an empty database on
+/// startup, so this is always present.
 async fn admin_account(bus: &bus::Bus) -> Result<model::UserId> {
     match bus.user_by_name(db::ADMIN_NAME).await? {
         Some(admin) => Ok(admin.id),

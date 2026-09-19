@@ -10,7 +10,7 @@ use anyhow::Result;
 use super::Db;
 use crate::model::*;
 
-/// The account the local `--ui` session attaches as. It has no ssh key and
+/// The account the `console` subcommand attaches as. It has no ssh key and
 /// never gets one, so it can only ever be used from the machine running the
 /// server -- if admin is online, someone is sitting at the box.
 pub const ADMIN_NAME: &str = "admin";

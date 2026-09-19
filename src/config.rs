@@ -22,6 +22,9 @@ pub const REPLAY_AGE_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// this much time passes (or the day changes).
 pub const GROUP_GAP_MILLIS: i64 = 5 * 60 * 1000;
 
+/// How many older messages to fetch when scrolling past the top.
+pub const SCROLLBACK_PAGE: usize = 100;
+
 /// How many messages a conversation view holds before older ones are dropped
 /// from memory and re-fetched on scroll.
 pub const MESSAGE_WINDOW: usize = 500;

@@ -9,12 +9,12 @@ services:
     # client gets a host-key-changed warning on their next connection.
     volumes:
       - newbbs-data:/var/lib/newbbs
-    ports:
-      - "2222:2222"
-    # Rootless podman's default networking. Without this, compose creates its
-    # own network, which needs netavark and ip_tables -- unavailable to a
-    # rootless user on a host that won't let it load the module.
-    network_mode: pasta
+    # The board only ever accepts inbound ssh, so it binds the host's port
+    # directly rather than depending on NAT. This works the same rootful or
+    # rootless, and sidesteps compose wanting to build its own network --
+    # which needs netavark and ip_tables, and collides with Docker's
+    # FORWARD DROP policy if Docker is also installed.
+    network_mode: host
     restart: unless-stopped
 
 volumes:

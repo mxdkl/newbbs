@@ -19,6 +19,13 @@ use crate::model::*;
 
 pub struct Db {
     conn: Connection,
+    /// Keeps UUIDv7 monotonic within a millisecond.
+    ///
+    /// `Uuid::now_v7` fills the sub-millisecond bits randomly, so two events
+    /// committed in the same millisecond sort arbitrarily -- and message order
+    /// is `ORDER BY id`. A shared counter makes ids strictly increasing, which
+    /// is safe here because one task owns the database.
+    clock: uuid::ContextV7,
 }
 
 impl Db {
@@ -36,7 +43,18 @@ impl Db {
         // it, so a writer has to wait rather than fail outright.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrations::apply(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            clock: uuid::ContextV7::new(),
+        })
+    }
+
+    /// A UUIDv7 whose embedded timestamp is `at`, so ordering by id is
+    /// ordering by time -- and monotonic within a millisecond.
+    fn uuid_at(&self, at: Millis) -> Uuid {
+        let secs = at.div_euclid(1000) as u64;
+        let nanos = (at.rem_euclid(1000) * 1_000_000) as u32;
+        Uuid::new_v7(uuid::Timestamp::from_unix(&self.clock, secs, nanos))
     }
 
     /// Reserve the next id for one of the integer-keyed entities.
@@ -71,7 +89,7 @@ impl Db {
         at: Millis,
     ) -> Result<Event> {
         let event = Event {
-            id: uuid_at(at),
+            id: self.uuid_at(at),
             at,
             actor,
             kind,
@@ -488,6 +506,12 @@ fn apply_projection(tx: &rusqlite::Transaction<'_>, event: &Event) -> Result<()>
                 params![message.as_bytes().as_slice()],
             )?;
         }
+        RoleRemoved { role } => {
+            // Same transaction, so nobody can observe a granted role whose
+            // definition has already gone.
+            tx.execute("DELETE FROM user_roles WHERE role_id = ?1", params![role])?;
+            tx.execute("DELETE FROM roles WHERE id = ?1", params![role])?;
+        }
     }
     Ok(())
 }
@@ -496,13 +520,7 @@ fn apply_projection(tx: &rusqlite::Transaction<'_>, event: &Event) -> Result<()>
 // row mapping
 // ---------------------------------------------------------------------------
 
-/// A UUIDv7 whose embedded timestamp is `at`, so ordering by id is ordering by
-/// time even for events given an explicit timestamp.
-fn uuid_at(at: Millis) -> Uuid {
-    let secs = at.div_euclid(1000) as u64;
-    let nanos = (at.rem_euclid(1000) * 1_000_000) as u32;
-    Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, secs, nanos))
-}
+
 
 fn encode_tag(tag: Tag) -> (i64, Option<i64>) {
     match tag {

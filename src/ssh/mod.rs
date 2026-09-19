@@ -2,8 +2,8 @@
 //!
 //! One process serves every session: russh terminates the connection, the key
 //! identifies the account, and each session runs the same [`crate::ui::App`]
-//! the local `--ui` path does -- rendering into the ssh channel instead of a
-//! local terminal.
+//! the `console` subcommand does -- rendering into the ssh channel instead of
+//! a local terminal.
 //!
 //! Access is invite-only. A key that matches an account is let in; a key that
 //! does not is shown its own fingerprint so its owner can ask to be added, and
@@ -41,10 +41,18 @@ const HOST_KEY_SETTING: &str = "ssh.host_key";
 const ENTER_SCREEN: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?25l";
 const LEAVE_SCREEN: &[u8] = b"\x1b[?25h\x1b[?7h\x1b[?1049l\x1b[0m";
 
-/// `announce` prints the banner for a human watching the terminal. It must be
-/// off when a local `--ui` session is attached: this runs in its own task, so
-/// the text would land on top of the TUI that is drawing at the same time.
-pub async fn serve(bus: Bus, listen: SocketAddr, announce: bool) -> Result<()> {
+/// Bind the listening socket.
+///
+/// Separate from [`serve`] so a port already in use is reported by the caller
+/// rather than from inside a task.
+pub async fn bind(listen: SocketAddr) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("binding {listen}"))
+}
+
+pub async fn serve(bus: Bus, socket: tokio::net::TcpListener) -> Result<()> {
+    let listen = socket.local_addr().context("reading the listening address")?;
     let host_key = host_key(&bus).await?;
     let fingerprint = host_key.public_key().fingerprint(HashAlg::Sha256);
 
@@ -64,13 +72,11 @@ pub async fn serve(bus: Bus, listen: SocketAddr, announce: bool) -> Result<()> {
         sessions: Arc::new(Sessions::default()),
     };
     tracing::info!(%listen, %fingerprint, "ssh listener started");
-    if announce {
-        eprintln!("newbbs listening on {listen}");
-        eprintln!("  host key {fingerprint}");
-        eprintln!("  connect with: ssh -p {} {LOGIN_NAME}@<host>", listen.port());
-    }
+    eprintln!("newbbs listening on {listen}");
+    eprintln!("  host key {fingerprint}");
+    eprintln!("  connect with: ssh -p {} {LOGIN_NAME}@<host>", listen.port());
     server
-        .run_on_address(config, listen)
+        .run_on_socket(config, &socket)
         .await
         .context("running the ssh listener")
 }

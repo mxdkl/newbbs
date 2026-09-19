@@ -711,6 +711,38 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Messages are ordered by uuid, so ids must increase even when several
+    /// are committed inside the same millisecond -- otherwise a burst of
+    /// traffic shuffles itself.
+    #[tokio::test]
+    async fn messages_keep_their_order_within_a_millisecond() {
+        let path = temp_db();
+        let (bus, _owner) = Bus::start(path.clone()).unwrap();
+        let admin = bus.user_by_name("admin").await.unwrap().unwrap();
+        let general = bus.conversation_by_name("general").await.unwrap().unwrap();
+
+        for n in 0..200 {
+            bus.commit(
+                Some(admin.id),
+                EventKind::MessageSent {
+                    conv: general.id,
+                    author: admin.id,
+                    body: n.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let read = bus.messages(general.id, None, 500, None).await.unwrap();
+        let order: Vec<String> = read.into_iter().map(|m| m.body).collect();
+        let expected: Vec<String> = (0..200).map(|n| n.to_string()).collect();
+        assert_eq!(order, expected, "messages came back out of order");
+
+        bus.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Appending an event and updating the projections is one transaction, so a
     /// read straight after a write always sees it.
     #[tokio::test]

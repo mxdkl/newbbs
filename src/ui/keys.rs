@@ -39,6 +39,9 @@ async fn normal(app: &mut App, key: KeyEvent, _sub: &Subscription) -> Result<()>
     if let Some('g') = app.pending {
         app.pending = None;
         if key.code == KeyCode::Char('g') {
+            // `gg` means the top of what is loaded; fetch more first so it
+            // reaches the real beginning rather than the end of the buffer.
+            app.load_older().await?;
             app.scroll = app.total_lines.saturating_sub(app.view_height);
             return Ok(());
         }
@@ -62,13 +65,9 @@ async fn normal(app: &mut App, key: KeyEvent, _sub: &Subscription) -> Result<()>
         KeyCode::Char('g') => app.pending = Some('g'),
         KeyCode::Char('G') => app.scroll = 0,
         KeyCode::Char('j') | KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.scroll = (app.scroll + 1).min(app.total_lines.saturating_sub(app.view_height));
-        }
+        KeyCode::Char('k') | KeyCode::Up => scroll_up(app, 1).await?,
         KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(page),
-        KeyCode::PageUp => {
-            app.scroll = (app.scroll + page).min(app.total_lines.saturating_sub(app.view_height));
-        }
+        KeyCode::PageUp => scroll_up(app, page).await?,
         KeyCode::Esc => {
             app.pending = None;
             app.scroll = 0;
@@ -123,6 +122,17 @@ async fn insert(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::End => app.cursor = app.input.chars().count(),
         _ => {}
     }
+    Ok(())
+}
+
+/// Scroll back, loading older history when the view reaches the top of what
+/// is in memory. The renderer clamps and anchors afterwards.
+async fn scroll_up(app: &mut App, lines: usize) -> Result<()> {
+    let top = app.total_lines.saturating_sub(app.view_height);
+    if app.scroll + lines >= top {
+        app.load_older().await?;
+    }
+    app.scroll += lines;
     Ok(())
 }
 
@@ -210,7 +220,7 @@ async fn overlay(app: &mut App, key: KeyEvent, sub: &Subscription) -> Result<()>
             }
             _ => {}
         },
-        Some(Overlay::Profile(_)) | Some(Overlay::Help) => match key.code {
+        Some(Overlay::Profile(_)) | Some(Overlay::Roles(_)) | Some(Overlay::Help) => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.overlay = None,
             _ => {}
         },

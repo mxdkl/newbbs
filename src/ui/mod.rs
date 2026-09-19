@@ -33,6 +33,7 @@ pub enum Mode {
 pub enum Overlay {
     Switcher(Switcher),
     Profile(User),
+    Roles(Vec<Role>),
     Help,
 }
 
@@ -61,6 +62,12 @@ pub struct App {
     pub flash_until: Option<std::time::Instant>,
     /// Lines scrolled back from the bottom of the conversation.
     pub scroll: usize,
+    /// Nothing older left to fetch in this conversation.
+    pub at_oldest: bool,
+    /// Line count from before older messages were prepended. The renderer
+    /// uses it to shift the viewport by however many lines arrived, so the
+    /// text under your eyes does not jump when history loads.
+    pub anchor: Option<usize>,
     /// A half-typed multi-key sequence, e.g. the first `g` of `gg`.
     pub pending: Option<char>,
     pub overlay: Option<Overlay>,
@@ -205,6 +212,8 @@ impl App {
             status: None,
             flash_until: None,
             scroll: 0,
+            at_oldest: false,
+            anchor: None,
             pending: None,
             overlay: None,
             view_height: 0,
@@ -283,6 +292,34 @@ impl App {
             .await?;
         self.members = self.bus.members(conv).await?;
         self.scroll = 0;
+        self.at_oldest = self.messages.len() < config::MESSAGE_WINDOW;
+        self.anchor = None;
+        Ok(())
+    }
+
+    /// Fetch the page of history before what is loaded. Called when the view
+    /// reaches the top of what it has.
+    pub async fn load_older(&mut self) -> Result<()> {
+        if self.at_oldest {
+            return Ok(());
+        }
+        let (Some(conv), Some(oldest)) = (
+            self.active_conv().map(|c| c.id),
+            self.messages.first().map(|m| m.id),
+        ) else {
+            return Ok(());
+        };
+        let older = self
+            .bus
+            .messages(conv, Some(oldest), config::SCROLLBACK_PAGE, Some(self.me))
+            .await?;
+        if older.is_empty() {
+            self.at_oldest = true;
+            return Ok(());
+        }
+        self.at_oldest = older.len() < config::SCROLLBACK_PAGE;
+        self.anchor = Some(self.total_lines);
+        self.messages.splice(0..0, older);
         Ok(())
     }
 
@@ -311,6 +348,13 @@ impl App {
             Some(role) => self.theme.color(role.color),
             None => self.theme.fg(),
         }
+    }
+
+    /// Holding any role marked admin. Gates the admin commands, and decides
+    /// whether `:help` mentions them at all.
+    pub fn is_admin(&self) -> bool {
+        self.user(self.me)
+            .is_some_and(|u| u.roles.iter().any(|r| r.admin))
     }
 
     pub fn set_status(&mut self, text: impl Into<String>) {
@@ -451,7 +495,9 @@ impl App {
                     created_at: event.at,
                     edited_at: None,
                 });
-                if self.messages.len() > config::MESSAGE_WINDOW {
+                // Only trim while following the conversation live; trimming
+                // during scrollback would throw away the history just paged in.
+                if self.scroll == 0 && self.messages.len() > config::MESSAGE_WINDOW {
                     self.messages.remove(0);
                 }
             }
@@ -652,6 +698,79 @@ mod tests {
             "the conversation moved between NORMAL and COMMAND"
         );
 
+        bus.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::*;
+    use crate::model::EventKind;
+
+    /// The view holds a window of the newest messages; scrolling past the top
+    /// has to reach further back, and know when it has hit the beginning.
+    #[tokio::test]
+    async fn paging_walks_back_through_history_and_stops() {
+        let path = std::env::temp_dir().join(format!("newbbs-page-{}.db", uuid::Uuid::now_v7()));
+        let (bus, _owner) = Bus::start(path.clone()).unwrap();
+        let me = bus.user_by_name(crate::db::ADMIN_NAME).await.unwrap().unwrap().id;
+        let conv = bus.conversation_by_name("general").await.unwrap().unwrap().id;
+
+        let total = config::MESSAGE_WINDOW + config::SCROLLBACK_PAGE + 25;
+        for n in 0..total {
+            bus.commit(
+                Some(me),
+                EventKind::MessageSent {
+                    conv,
+                    author: me,
+                    body: format!("message {n}"),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut app = App::new(bus.clone(), me).await.unwrap();
+        assert_eq!(app.messages.len(), config::MESSAGE_WINDOW);
+        assert!(!app.at_oldest, "there is more history than the window");
+        assert_eq!(app.messages.last().unwrap().body, format!("message {}", total - 1));
+
+        app.load_older().await.unwrap();
+        assert_eq!(
+            app.messages.len(),
+            config::MESSAGE_WINDOW + config::SCROLLBACK_PAGE
+        );
+        // Prepended in order, oldest first.
+        assert_eq!(
+            app.messages[0].body,
+            format!("message {}", total - config::MESSAGE_WINDOW - config::SCROLLBACK_PAGE)
+        );
+        assert!(app.anchor.is_some(), "the renderer needs to re-anchor");
+
+        app.load_older().await.unwrap();
+        assert_eq!(app.messages.len(), total, "the rest of the history");
+        assert_eq!(app.messages[0].body, "message 0");
+        assert!(app.at_oldest, "a short page means we reached the beginning");
+
+        // Asking again at the beginning must not loop or duplicate.
+        let before = app.messages.len();
+        app.load_older().await.unwrap();
+        assert_eq!(app.messages.len(), before);
+
+        bus.shutdown();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A fresh conversation with little history should know immediately that
+    /// there is nothing older, rather than querying on every keypress.
+    #[tokio::test]
+    async fn a_short_conversation_is_known_to_be_complete() {
+        let path = std::env::temp_dir().join(format!("newbbs-short-{}.db", uuid::Uuid::now_v7()));
+        let (bus, _owner) = Bus::start(path.clone()).unwrap();
+        let me = bus.user_by_name(crate::db::ADMIN_NAME).await.unwrap().unwrap().id;
+        let app = App::new(bus.clone(), me).await.unwrap();
+        assert!(app.at_oldest);
         bus.shutdown();
         let _ = std::fs::remove_file(&path);
     }

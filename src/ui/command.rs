@@ -37,6 +37,8 @@ pub async fn run(app: &mut App, line: &str, sub: &Subscription) -> Result<()> {
         "mkchan" => mkchan(app, &args, sub).await?,
         "rmchan" => rmchan(app, &args).await?,
         "mkrole" => mkrole(app, &args).await?,
+        "rmrole" => rmrole(app, &args).await?,
+        "roles" => roles(app).await?,
         "grant" => grant(app, &args, true).await?,
         "revoke" => grant(app, &args, false).await?,
         "ban" => app.set_error("ban needs the ssh auth layer, which is not built yet"),
@@ -321,27 +323,38 @@ async fn mkrole(app: &mut App, args: &[&str]) -> Result<()> {
     if args.len() < 2 {
         return Ok(app.set_error("usage: :mkrole <name> <#rrggbb> [priority] [hoist]"));
     }
-    let Ok(color) = u32::from_str_radix(args[1].trim_start_matches('#'), 16) else {
-        return Ok(app.set_error("colour must look like #61afef"));
-    };
     let priority = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(10);
     let hoisted = args.get(3).is_some_and(|h| *h == "hoist" || *h == "true");
     let me = app.me();
-    let role = app.bus().alloc("role").await?;
-    app.bus()
-        .commit(
-            Some(me),
-            EventKind::RoleCreated {
-                role,
-                name: args[0].to_string(),
-                color,
-                priority,
-                hoisted,
-                admin: false,
-            },
-        )
-        .await?;
-    app.set_status(format!("created role {}", args[0]));
+    match crate::roles::create(app.bus(), Some(me), args[0], args[1], priority, hoisted).await {
+        Ok(message) => app.set_status(message),
+        Err(err) => app.set_error(format!("{err}")),
+    }
+    Ok(())
+}
+
+async fn rmrole(app: &mut App, args: &[&str]) -> Result<()> {
+    if !require_admin(app) {
+        return Ok(());
+    }
+    let Some(name) = args.first() else {
+        return Ok(app.set_error("usage: :rmrole <name>"));
+    };
+    let me = app.me();
+    match crate::roles::remove(app.bus(), Some(me), name).await {
+        Ok(message) => app.set_status(message),
+        Err(err) => app.set_error(format!("{err}")),
+    }
+    Ok(())
+}
+
+/// Everything that exists, so you can see what there is to grant.
+async fn roles(app: &mut App) -> Result<()> {
+    let roles = app.bus().roles().await?;
+    if roles.is_empty() {
+        return Ok(app.set_status("no roles yet -- :mkrole makes one"));
+    }
+    app.overlay = Some(Overlay::Roles(roles));
     Ok(())
 }
 
@@ -353,40 +366,17 @@ async fn grant(app: &mut App, args: &[&str], granting: bool) -> Result<()> {
         let verb = if granting { "grant" } else { "revoke" };
         return Ok(app.set_error(format!("usage: :{verb} <user> <role>")));
     }
-    let Some(user) = app
-        .bus()
-        .user_by_name(args[0].trim_start_matches('@'))
-        .await?
-    else {
-        return Ok(app.set_error(format!("no user called {}", args[0])));
-    };
-    let roles = app.bus().roles().await?;
-    let Some(role) = roles.iter().find(|r| r.name == args[1]) else {
-        return Ok(app.set_error(format!("no role called {}", args[1])));
-    };
     let me = app.me();
-    let kind = if granting {
-        EventKind::RoleGranted {
-            user: user.id,
-            role: role.id,
-        }
-    } else {
-        EventKind::RoleRevoked {
-            user: user.id,
-            role: role.id,
-        }
-    };
-    app.bus().commit(Some(me), kind).await?;
-    let verb = if granting { "granted" } else { "revoked" };
-    app.set_status(format!("{verb} {} for {}", role.name, user.name));
+    match crate::roles::grant(app.bus(), Some(me), args[0], args[1], granting).await {
+        Ok(message) => app.set_status(message),
+        Err(err) => app.set_error(format!("{err}")),
+    }
     Ok(())
 }
 
 /// Admin commands are gated on holding a role marked admin.
 fn require_admin(app: &mut App) -> bool {
-    let is_admin = app
-        .user(app.me())
-        .is_some_and(|u| u.roles.iter().any(|r| r.admin));
+    let is_admin = app.is_admin();
     if !is_admin {
         app.set_error("that command needs an admin role");
     }

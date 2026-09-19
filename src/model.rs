@@ -186,6 +186,10 @@ pub enum EventKind {
     MessageDeleted {
         message: MessageId,
     },
+    /// Removing a role also strips it from everyone holding it.
+    RoleRemoved {
+        role: RoleId,
+    },
 }
 
 impl EventKind {
@@ -207,6 +211,7 @@ impl EventKind {
             }
             MessageSent { conv, author, .. } => vec![Tag::Conv(*conv), Tag::User(*author)],
             MessageEdited { .. } | MessageDeleted { .. } => Vec::new(),
+            RoleRemoved { .. } => vec![Tag::Roles],
         }
     }
 }
