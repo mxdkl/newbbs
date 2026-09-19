@@ -33,6 +33,7 @@ pub async fn run(app: &mut App, line: &str, sub: &Subscription) -> Result<()> {
         "dm" => dm(app, &args, sub).await?,
         "group" => group(app, &args, sub).await?,
         "invite" => invite(app, rest).await?,
+        "motd" => motd(app, rest).await?,
         "mkchan" => mkchan(app, &args, sub).await?,
         "rmchan" => rmchan(app, &args).await?,
         "mkrole" => mkrole(app, &args).await?,
@@ -222,6 +223,22 @@ async fn group(app: &mut App, args: &[&str], sub: &Subscription) -> Result<()> {
     if let Some(index) = app.convs.iter().position(|c| c.id == conv) {
         app.select(index, sub).await?;
     }
+    Ok(())
+}
+
+/// `:motd <text>` -- the message under the splash art. The art itself is set
+/// from a file with `newbbs art`, since it cannot be typed on one line.
+async fn motd(app: &mut App, rest: &str) -> Result<()> {
+    if !require_admin(app) {
+        return Ok(());
+    }
+    if rest.is_empty() {
+        return Ok(app.set_error("usage: :motd <text>"));
+    }
+    app.bus()
+        .set_setting(crate::config::SETTING_MOTD, rest.as_bytes().to_vec())
+        .await?;
+    app.set_status("motd updated");
     Ok(())
 }
 

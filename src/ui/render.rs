@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::Theme;
-use super::{App, Mode, Overlay, markdown};
+use super::{App, Mode, Overlay, ansi, markdown};
 use crate::config;
 use crate::model::*;
 
@@ -717,6 +717,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     lines.push(row(":dm", ":group <name> <user...>  :join #chan"));
     lines.push(row(":topic", ":mkchan  :rmchan  (admin)"));
     lines.push(row(":invite", ":invite <name> <ssh key>  (admin)"));
+    lines.push(row(":motd", "set the message on the splash  (admin)"));
     lines.push(row(":mkrole", ":grant <user> <role>  :revoke  (admin)"));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -760,4 +761,55 @@ fn truncate(text: &str, width: usize) -> String {
         out.push('\u{2026}');
         out
     }
+}
+
+/// The splash an ssh session sees before the board: art, then the message
+/// under it. Nothing else -- no hint, no stats.
+///
+/// The art is centred as a *block*, on its widest line, so lines of differing
+/// length keep their shape. Coloured art brings its own palette and is drawn
+/// exactly as authored; uncoloured art follows the theme. Art too wide for the
+/// terminal is dropped rather than shown mangled -- the message still shows.
+pub fn draw_splash(frame: &mut Frame, art: &str, motd: &str, theme: &Theme) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let art = ansi::parse(art, Style::default().fg(theme.accent()));
+    let fits = art.width <= area.width as usize;
+    let indent = (area.width as usize).saturating_sub(art.width) / 2;
+
+    let mut lines: Vec<Line> = Vec::new();
+    if fits {
+        for line in art.lines {
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    let motd_lines: Vec<&str> = motd.lines().collect();
+    if !motd_lines.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        for line in motd_lines {
+            // The message is prose, not art, so it is centred on its own.
+            lines.push(
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.fg()),
+                ))
+                .centered(),
+            );
+        }
+    }
+
+    let height = lines.len() as u16;
+    let block = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: area.width,
+        height: height.min(area.height),
+    };
+    frame.render_widget(Paragraph::new(lines), block);
 }

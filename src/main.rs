@@ -53,6 +53,23 @@ enum Command {
         #[arg(long)]
         overlay: Option<String>,
     },
+    /// Show or set the message under the splash art.
+    Motd {
+        /// The new message. Omit to print the current one.
+        text: Vec<String>,
+        /// Go back to the built-in message.
+        #[arg(long, conflicts_with = "text")]
+        reset: bool,
+    },
+    /// Set the splash art from a file.
+    Art {
+        /// A UTF-8 text file, with or without ANSI colour codes.
+        #[arg(required_unless_present = "reset")]
+        file: Option<PathBuf>,
+        /// Go back to the built-in art.
+        #[arg(long, conflicts_with = "file")]
+        reset: bool,
+    },
     /// Dump the event log as JSON (the log itself is postcard on disk).
     Log {
         /// How many events, oldest first.
@@ -79,6 +96,8 @@ fn main() -> Result<()> {
                 height,
                 overlay,
             } => snapshot(db_path, width, height, overlay).await,
+            Command::Motd { text, reset } => motd(db_path, text, reset).await,
+            Command::Art { file, reset } => art(db_path, file, reset).await,
             Command::Log { limit } => dump_log(db_path, limit).await,
         }
     })
@@ -168,6 +187,72 @@ async fn snapshot(
     print!("{text}");
     bus.shutdown();
     let _ = owner.await;
+    Ok(())
+}
+
+async fn motd(db_path: PathBuf, text: Vec<String>, reset: bool) -> Result<()> {
+    let (bus, owner) = bus::Bus::start(db_path)?;
+    let result = async {
+        if reset {
+            bus.clear_setting(config::SETTING_MOTD).await?;
+            println!("motd reset to: {}", config::DEFAULT_MOTD);
+        } else if text.is_empty() {
+            let current = bus.setting(config::SETTING_MOTD).await?;
+            let current = match current {
+                Some(bytes) => String::from_utf8(bytes).unwrap_or_default(),
+                None => config::DEFAULT_MOTD.to_string(),
+            };
+            println!("{current}");
+        } else {
+            let text = text.join(" ");
+            bus.set_setting(config::SETTING_MOTD, text.clone().into_bytes())
+                .await?;
+            println!("motd set to: {text}");
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    bus.shutdown();
+    let _ = owner.await;
+    result
+}
+
+async fn art(db_path: PathBuf, file: Option<PathBuf>, reset: bool) -> Result<()> {
+    if reset {
+        let (bus, owner) = bus::Bus::start(db_path)?;
+        let result = bus.clear_setting(config::SETTING_ART).await;
+        bus.shutdown();
+        let _ = owner.await;
+        result?;
+        println!("splash art reset to the built-in banner");
+        return Ok(());
+    }
+    let file = file.expect("clap requires a file unless --reset");
+    let art = std::fs::read_to_string(&file)
+        .with_context(|| format!("reading {}", file.display()))?;
+    // Trailing newlines would push the block off centre.
+    let art = art.trim_end_matches('\n').to_string();
+    let (bus, owner) = bus::Bus::start(db_path)?;
+    let result = bus
+        .set_setting(config::SETTING_ART, art.clone().into_bytes())
+        .await;
+    bus.shutdown();
+    let _ = owner.await;
+    result?;
+    let parsed = ui::art_summary(&art);
+    println!(
+        "splash art set from {} ({} lines, {} columns{})",
+        file.display(),
+        art.lines().count(),
+        parsed.0,
+        if parsed.1 { ", coloured" } else { "" }
+    );
+    if parsed.2 {
+        eprintln!(
+            "warning: this file has no escape characters but looks like colour codes \
+             lost them -- it will render as literal text like `[0;37m`"
+        );
+    }
     Ok(())
 }
 

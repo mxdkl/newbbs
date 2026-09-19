@@ -150,6 +150,7 @@ impl Server for SshServer {
             identity: None,
             offered: None,
             pty: None,
+            term: String::new(),
             input: None,
             parser: InputParser::new(),
         }
@@ -170,6 +171,8 @@ pub struct Connection {
     /// to them.
     offered: Option<String>,
     pty: Option<Arc<PtySize>>,
+    /// The client's TERM, which decides how much colour we may send.
+    term: String,
     input: Option<mpsc::UnboundedSender<SessionEvent>>,
     parser: InputParser,
 }
@@ -231,7 +234,7 @@ impl Handler for Connection {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
+        term: &str,
         columns: u32,
         rows: u32,
         _pix_width: u32,
@@ -240,6 +243,7 @@ impl Handler for Connection {
         session: &mut Session,
     ) -> Result<()> {
         self.pty = Some(PtySize::new(columns as u16, rows as u16));
+        self.term = term.to_string();
         session.channel_success(channel)?;
         Ok(())
     }
@@ -270,8 +274,9 @@ impl Handler for Connection {
 
         let bus = self.bus.clone();
         let sessions = self.sessions.clone();
+        let term = self.term.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_session(bus, me, handle, channel, size, events).await {
+            if let Err(err) = run_session(bus, me, handle, channel, size, events, term).await {
                 tracing::error!(user = me, %err, "session ended badly");
             }
             sessions.release(me, id).await;
@@ -329,6 +334,7 @@ async fn run_session(
     channel: ChannelId,
     size: Arc<PtySize>,
     mut events: mpsc::UnboundedReceiver<SessionEvent>,
+    term: String,
 ) -> Result<()> {
     let (bytes_tx, mut bytes_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = handle.clone();
@@ -344,8 +350,21 @@ async fn run_session(
     let backend = SshBackend::new(ChannelWriter::new(bytes_tx.clone()), size);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = ui::App::new(bus, me).await?;
-    let ended = app.event_loop(&mut terminal, &mut events).await;
+    // ssh does not forward COLORTERM, so the client's TERM is all we have to
+    // judge colour depth by. Guessing from the server's own environment would
+    // send truecolor to someone sitting at a plain console.
+    let theme = ui::theme::Theme::for_term(&term);
+
+    let ended = match ui::splash(&mut terminal, &mut events, &bus, &theme).await {
+        // They left while the splash was up; there is no session to run.
+        Ok(false) => Ok(None),
+        Ok(true) => {
+            let mut app = ui::App::new(bus, me).await?;
+            app.theme = theme;
+            app.event_loop(&mut terminal, &mut events).await
+        }
+        Err(err) => Err(err),
+    };
 
     // The terminal owns a clone of the byte sender. Until it is dropped the
     // writer task below can never see the channel close, and awaiting it would

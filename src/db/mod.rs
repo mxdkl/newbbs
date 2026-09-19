@@ -361,6 +361,13 @@ impl Db {
         Ok(())
     }
 
+    /// Remove a setting, so whatever reads it falls back to its default.
+    pub fn clear_setting(&mut self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> Result<bool> {
         let count: i64 = self
             .conn

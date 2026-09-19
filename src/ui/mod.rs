@@ -4,6 +4,7 @@
 //! of what it is currently showing, and reacts to deliveries -- fetching the
 //! event behind a uuid, or re-reading state when it is told it fell behind.
 
+mod ansi;
 mod command;
 mod keys;
 mod markdown;
@@ -80,6 +81,57 @@ pub enum SessionEvent {
     Resize,
     /// The server is ending this session; the reason is shown on the way out.
     Disconnect(String),
+}
+
+/// Hold the splash until the visitor presses something. Returns false if they
+/// went away instead.
+///
+/// The art and message come from settings, falling back to the compiled-in
+/// defaults, so a board that has never been configured still looks right.
+pub async fn splash<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    events: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    bus: &Bus,
+    theme: &Theme,
+) -> Result<bool>
+where
+    B::Error: Send + Sync + 'static,
+{
+    let setting = |key: &'static str, fallback: &'static str| {
+        let bus = bus.clone();
+        async move {
+            match bus.setting(key).await {
+                Ok(Some(bytes)) => String::from_utf8(bytes).unwrap_or_else(|_| fallback.into()),
+                Ok(None) => fallback.into(),
+                Err(err) => {
+                    tracing::warn!(key, %err, "could not read setting; using the default");
+                    fallback.into()
+                }
+            }
+        }
+    };
+    let art = setting(config::SETTING_ART, config::DEFAULT_ART).await;
+    let motd = setting(config::SETTING_MOTD, config::DEFAULT_MOTD).await;
+
+    loop {
+        terminal.draw(|frame| render::draw_splash(frame, &art, &motd, theme))?;
+        match events.recv().await {
+            Some(SessionEvent::Key(_)) => return Ok(true),
+            // Redraw at the new size and keep waiting.
+            Some(SessionEvent::Resize) => continue,
+            Some(SessionEvent::Disconnect(_)) | None => return Ok(false),
+        }
+    }
+}
+
+/// (width, coloured, escapes-look-stripped) -- for `newbbs art` to report.
+pub fn art_summary(art: &str) -> (usize, bool, bool) {
+    let parsed = ansi::parse(art, ratatui::style::Style::default());
+    (
+        parsed.width,
+        parsed.colored,
+        ansi::looks_like_stripped_escapes(art),
+    )
 }
 
 pub async fn run(bus: Bus, me: UserId) -> Result<()> {

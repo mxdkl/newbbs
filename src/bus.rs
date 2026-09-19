@@ -83,6 +83,7 @@ pub enum Request {
     UserKeys,
     Setting(String),
     SetSetting { key: String, value: Vec<u8> },
+    ClearSetting(String),
 }
 
 #[allow(dead_code)]
@@ -330,6 +331,12 @@ impl Bus {
         .map(|_| ())
     }
 
+    pub async fn clear_setting(&self, key: &str) -> Result<()> {
+        self.request(Request::ClearSetting(key.to_string()))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn log_dump(&self, limit: usize) -> Result<Vec<Event>> {
         match self.request(Request::LogDump(limit)).await? {
             Response::Events(e) => Ok(e),
@@ -515,6 +522,10 @@ impl BusState {
             Request::Setting(key) => Ok(Response::Setting(db.setting(&key)?)),
             Request::SetSetting { key, value } => {
                 db.set_setting(&key, &value)?;
+                Ok(Response::Unit)
+            }
+            Request::ClearSetting(key) => {
+                db.clear_setting(&key)?;
                 Ok(Response::Unit)
             }
         }

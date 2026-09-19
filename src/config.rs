@@ -52,3 +52,21 @@ pub fn default_db_path() -> PathBuf {
 pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
 }
+
+// ---------------------------------------------------------------------------
+// the splash shown to an ssh session before the board
+// ---------------------------------------------------------------------------
+
+/// Settings keys. Both fall back to the defaults below when unset, so a fresh
+/// board looks right without any setup.
+pub const SETTING_ART: &str = "splash.art";
+pub const SETTING_MOTD: &str = "splash.motd";
+
+pub const DEFAULT_ART: &str = concat!(
+    " _____           _____ _____ _____ \n",
+    "|   | |___ _ _ _| __  | __  |   __|\n",
+    "| | | | -_| | | | __ -| __ -|__   |\n",
+    "|_|___|___|_____|_____|_____|_____|",
+);
+
+pub const DEFAULT_MOTD: &str = "powered by newbbs";

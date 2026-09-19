@@ -33,9 +33,24 @@ warning after a rebuild.
 ```sh
 cargo run -- serve --ui          # ssh listener plus a TUI session on this terminal
 cargo run -- invite bob bob.pub
+cargo run -- motd                # show the splash message, or set it
+cargo run -- art banner.txt      # set the splash art from a file
 cargo run -- log --limit 20      # the event log, as JSON
 cargo run -- snapshot            # render one frame to stdout, no tty needed
 ```
+
+An ssh session is met by the splash -- art with the message underneath --
+which waits for a keypress before the board appears. `serve --ui` skips it.
+Admins can set the message from inside with `:motd <text>`; the art comes from
+a file because it cannot be typed on one line. `--reset` on either puts the
+built-in back.
+
+The art file is UTF-8 text, with or without ANSI colour codes. Plain art is
+drawn in the theme's accent colour; coloured art keeps exactly the colours it
+was written with (`ESC[...m` -- 16-colour, 256-colour and RGB, foreground and
+background). Cursor-movement codes are skipped rather than drawn, so classic
+CP437 `.ANS` files from the scene will not render properly yet. Art wider than
+the visitor's terminal is dropped, leaving the message on its own.
 
 A fresh database starts empty: one `#general` channel, a `sysop` role, and an
 `admin` account. `admin` has no ssh key and can never get one -- it is only

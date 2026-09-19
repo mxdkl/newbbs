@@ -14,14 +14,23 @@ pub enum Depth {
 }
 
 impl Depth {
-    /// Best guess from the environment, the way most terminal apps do it.
+    /// Best guess from our own environment, the way most terminal apps do it.
     pub fn detect() -> Depth {
         let colorterm = std::env::var("COLORTERM").unwrap_or_default();
         if colorterm.contains("truecolor") || colorterm.contains("24bit") {
             return Depth::Truecolor;
         }
-        let term = std::env::var("TERM").unwrap_or_default();
-        if term.contains("256color") || term.contains("direct") {
+        Depth::from_term(&std::env::var("TERM").unwrap_or_default())
+    }
+
+    /// From a TERM string alone -- what an ssh session has to go on, since
+    /// ssh does not forward COLORTERM. Guessing from the *server's*
+    /// environment would send truecolor to someone on a plain console.
+    pub fn from_term(term: &str) -> Depth {
+        if term.contains("direct") {
+            return Depth::Truecolor;
+        }
+        if term.contains("256color") {
             return Depth::Ansi256;
         }
         Depth::Ansi16
@@ -99,8 +108,20 @@ pub struct Theme {
 impl Theme {
     pub fn new() -> Theme {
         Theme {
-            name: "dark".into(),
             depth: Depth::detect(),
+            ..Theme::with_depth(Depth::Ansi16)
+        }
+    }
+
+    /// For a session whose terminal is not ours -- an ssh client.
+    pub fn for_term(term: &str) -> Theme {
+        Theme::with_depth(Depth::from_term(term))
+    }
+
+    fn with_depth(depth: Depth) -> Theme {
+        Theme {
+            name: "dark".into(),
+            depth,
             palette: DARK,
             mono: false,
         }
