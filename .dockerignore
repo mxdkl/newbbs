@@ -1,0 +1,9 @@
+# The build context is uploaded to the builder before anything runs, and
+# target/ is gigabytes of artefacts the image build never uses -- it recompiles
+# for musl inside the container regardless.
+target/
+.git/
+.github/
+art/
+*.md
+compose.yaml

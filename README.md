@@ -8,9 +8,9 @@ you connect, you are you.
 ## Running it
 
 ```sh
-podman build -t localhost/newbbs -f Containerfile .
 podman volume create newbbs-data
-podman run -d --name newbbs --network host -v newbbs-data:/var/lib/newbbs localhost/newbbs
+podman run -d --name newbbs --network host -v newbbs-data:/var/lib/newbbs \
+    ghcr.io/mxdkl/newbbs:latest
 podman exec newbbs newbbs invite alice "$(cat ~/.ssh/id_ed25519.pub)"
 podman exec newbbs newbbs grant alice sysop            # make them an admin
 ssh -p 2222 newbbs@localhost
@@ -31,8 +31,16 @@ Or with compose (needs `podman-compose` or `docker-compose` on PATH). It uses
 the same volume, so you can switch between the two freely:
 
 ```sh
-podman compose up -d
-podman exec newbbs newbbs invite alice "$(cat ~/.ssh/id_ed25519.pub)"
+podman compose up -d           # pulls the published image
+podman compose up -d --build   # or build from source instead
+```
+
+CI publishes `ghcr.io/mxdkl/newbbs:latest` on every push to main, plus an
+immutable `:sha-<commit>` tag to roll back to. Updating is a pull and a
+restart, with no compiler on the server:
+
+```sh
+podman pull ghcr.io/mxdkl/newbbs:latest && podman-compose up -d
 ```
 
 `podman logs newbbs` shows the log. The database lives at

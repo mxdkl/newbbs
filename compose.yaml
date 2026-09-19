@@ -1,9 +1,11 @@
 services:
   newbbs:
+    # Published by CI on every push to main. `podman-compose up -d` pulls it;
+    # `--build` still builds from source locally and tags it the same.
+    image: ghcr.io/mxdkl/newbbs:latest
     build:
       context: .
       dockerfile: Containerfile
-    image: localhost/newbbs:latest
     container_name: newbbs
     # The host key lives in the database, so losing this volume means every
     # client gets a host-key-changed warning on their next connection.
