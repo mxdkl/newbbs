@@ -80,6 +80,9 @@ pub enum Request {
     Roles,
     TouchLastSeen(UserId),
     LogDump(usize),
+    UserKeys,
+    Setting(String),
+    SetSetting { key: String, value: Vec<u8> },
 }
 
 #[allow(dead_code)]
@@ -98,6 +101,8 @@ pub enum Response {
     Users(Vec<User>),
     MaybeUser(Option<User>),
     Roles(Vec<Role>),
+    UserKeys(Vec<(UserId, String)>),
+    Setting(Option<Vec<u8>>),
 }
 
 enum BusMsg {
@@ -302,6 +307,29 @@ impl Bus {
         self.request(Request::TouchLastSeen(user)).await.map(|_| ())
     }
 
+    pub async fn user_keys(&self) -> Result<Vec<(UserId, String)>> {
+        match self.request(Request::UserKeys).await? {
+            Response::UserKeys(keys) => Ok(keys),
+            other => bail!("unexpected response {other:?}"),
+        }
+    }
+
+    pub async fn setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        match self.request(Request::Setting(key.to_string())).await? {
+            Response::Setting(value) => Ok(value),
+            other => bail!("unexpected response {other:?}"),
+        }
+    }
+
+    pub async fn set_setting(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.request(Request::SetSetting {
+            key: key.to_string(),
+            value,
+        })
+        .await
+        .map(|_| ())
+    }
+
     pub async fn log_dump(&self, limit: usize) -> Result<Vec<Event>> {
         match self.request(Request::LogDump(limit)).await? {
             Response::Events(e) => Ok(e),
@@ -483,6 +511,12 @@ impl BusState {
                 Ok(Response::Unit)
             }
             Request::LogDump(limit) => Ok(Response::Events(db.all_events(limit)?)),
+            Request::UserKeys => Ok(Response::UserKeys(db.user_keys()?)),
+            Request::Setting(key) => Ok(Response::Setting(db.setting(&key)?)),
+            Request::SetSetting { key, value } => {
+                db.set_setting(&key, &value)?;
+                Ok(Response::Unit)
+            }
         }
     }
 

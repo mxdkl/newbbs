@@ -32,6 +32,7 @@ pub async fn run(app: &mut App, line: &str, sub: &Subscription) -> Result<()> {
         "join" => join(app, &args, sub).await?,
         "dm" => dm(app, &args, sub).await?,
         "group" => group(app, &args, sub).await?,
+        "invite" => invite(app, rest).await?,
         "mkchan" => mkchan(app, &args, sub).await?,
         "rmchan" => rmchan(app, &args).await?,
         "mkrole" => mkrole(app, &args).await?,
@@ -220,6 +221,26 @@ async fn group(app: &mut App, args: &[&str], sub: &Subscription) -> Result<()> {
     app.reload().await?;
     if let Some(index) = app.convs.iter().position(|c| c.id == conv) {
         app.select(index, sub).await?;
+    }
+    Ok(())
+}
+
+/// `:invite <name> <ssh public key>` -- the key runs to the end of the line,
+/// comment and all, so it can be pasted straight from a .pub file.
+async fn invite(app: &mut App, rest: &str) -> Result<()> {
+    if !require_admin(app) {
+        return Ok(());
+    }
+    let Some((name, key)) = rest.split_once(char::is_whitespace) else {
+        return Ok(app.set_error("usage: :invite <name> <ssh public key>"));
+    };
+    let me = app.me();
+    match crate::ssh::invite(app.bus(), Some(me), name, key).await {
+        Ok(fingerprint) => {
+            app.reload().await?;
+            app.set_status(format!("invited {name} ({fingerprint})"));
+        }
+        Err(err) => app.set_error(format!("{err}")),
     }
     Ok(())
 }

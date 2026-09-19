@@ -716,6 +716,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     lines.push(row(":info", ":nick <name>  :bio <text>"));
     lines.push(row(":dm", ":group <name> <user...>  :join #chan"));
     lines.push(row(":topic", ":mkchan  :rmchan  (admin)"));
+    lines.push(row(":invite", ":invite <name> <ssh key>  (admin)"));
     lines.push(row(":mkrole", ":grant <user> <role>  :revoke  (admin)"));
 
     frame.render_widget(Paragraph::new(lines), inner);

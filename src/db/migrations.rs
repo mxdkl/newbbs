@@ -81,6 +81,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX messages_by_conv ON messages(conv_id, created_at);
     "#,
+    // 2: server-owned settings that are not domain events -- the ssh host key
+    // lives here so the database file is the whole server.
+    r#"
+    CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value BLOB NOT NULL
+    );
+    "#,
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

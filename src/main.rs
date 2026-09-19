@@ -4,10 +4,12 @@ mod bus;
 mod config;
 mod db;
 mod model;
+mod ssh;
 mod ui;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -26,9 +28,20 @@ struct Cli {
 enum Command {
     /// Run the server.
     Serve {
+        /// Address to listen on for ssh.
+        #[arg(long, default_value = "0.0.0.0:2222", value_name = "ADDR")]
+        listen: SocketAddr,
+
         /// Also attach a TUI session on this terminal, as the admin account.
         #[arg(long)]
         ui: bool,
+    },
+    /// Create an account bound to an ssh public key.
+    Invite {
+        /// The name they will appear as.
+        name: String,
+        /// Their public key, or a path to a .pub file.
+        key: String,
     },
     /// Render one frame of the TUI to stdout as text, without needing a tty.
     Snapshot {
@@ -68,7 +81,8 @@ fn main() -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         match cli.command {
-            Command::Serve { ui } => serve(db_path, ui).await,
+            Command::Serve { listen, ui } => serve(db_path, listen, ui).await,
+            Command::Invite { name, key } => invite(db_path, name, key).await,
             Command::Snapshot {
                 width,
                 height,
@@ -79,21 +93,45 @@ fn main() -> Result<()> {
     })
 }
 
-async fn serve(db_path: PathBuf, with_ui: bool) -> Result<()> {
+async fn serve(db_path: PathBuf, listen: SocketAddr, with_ui: bool) -> Result<()> {
     let (bus, owner) = bus::Bus::start(db_path)?;
     let admin = ensure_seeded(&bus).await?;
 
-    if with_ui {
-        let result = ui::run(bus.clone(), admin).await;
-        bus.shutdown();
-        let _ = owner.await;
-        result?;
+    let listener = tokio::spawn({
+        let bus = bus.clone();
+        async move { ssh::serve(bus, listen).await }
+    });
+
+    let result = if with_ui {
+        // The local session runs alongside the listener; when it quits, so
+        // does the server.
+        ui::run(bus.clone(), admin).await
     } else {
-        tracing::info!("serving (ssh listener not implemented yet)");
-        eprintln!("newbbs: the ssh listener is not built yet -- run `newbbs serve --ui`");
-        bus.shutdown();
-        let _ = owner.await;
-    }
+        // Nothing else to do here -- wait on the listener.
+        match listener.await {
+            Ok(result) => result,
+            Err(err) => Err(err.into()),
+        }
+    };
+
+    bus.shutdown();
+    let _ = owner.await;
+    result
+}
+
+async fn invite(db_path: PathBuf, name: String, key: String) -> Result<()> {
+    let (bus, owner) = bus::Bus::start(db_path)?;
+    let key = ssh::read_key_argument(&key)?;
+    let result = ssh::invite(&bus, None, &name, &key).await;
+    bus.shutdown();
+    let _ = owner.await;
+
+    let fingerprint = result?;
+    println!("invited {name}");
+    println!("  key {fingerprint}");
+    // The listener's port belongs to `serve`, not to this command, so don't
+    // claim one here.
+    println!("  they connect as: ssh -p <port> {}@<host>", ssh::LOGIN_NAME);
     Ok(())
 }
 

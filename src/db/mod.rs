@@ -32,6 +32,9 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // `newbbs invite` runs against the same file while the server holds
+        // it, so a writer has to wait rather than fail outright.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrations::apply(&mut conn)?;
         Ok(Self { conn })
     }
@@ -322,6 +325,38 @@ impl Db {
         self.conn.execute(
             "UPDATE users SET last_seen = ?2 WHERE id = ?1",
             params![user, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Every account that has a key, for authenticating an ssh connection.
+    /// Small servers only, which is what this is: the caller compares parsed
+    /// keys rather than us indexing a fingerprint.
+    pub fn user_keys(&self) -> Result<Vec<(UserId, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, pubkey FROM users WHERE pubkey <> '' ORDER BY id")?;
+        Ok(stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )?;
         Ok(())
     }

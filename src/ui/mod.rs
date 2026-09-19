@@ -72,12 +72,27 @@ pub struct App {
     quit: bool,
 }
 
+/// What drives a session. The local terminal and an ssh channel produce the
+/// same events, so the loop below does not know which it is serving.
+#[derive(Debug)]
+pub enum SessionEvent {
+    Key(crossterm::event::KeyEvent),
+    Resize,
+    /// The server is ending this session; the reason is shown on the way out.
+    Disconnect(String),
+}
+
 pub async fn run(bus: Bus, me: UserId) -> Result<()> {
     let mut app = App::new(bus, me).await?;
     let mut terminal = init_terminal()?;
-    let result = app.event_loop(&mut terminal).await;
+    let (tx, mut events) = mpsc::unbounded_channel();
+    spawn_input_reader(tx);
+    let result = app.event_loop(&mut terminal, &mut events).await;
     restore_terminal();
-    result
+    if let Some(reason) = result.as_ref().ok().and_then(|r| r.clone()) {
+        println!("{reason}");
+    }
+    result.map(|_| ())
 }
 
 /// Like `ratatui::init`, plus one thing it does not do: turn off line wrap.
@@ -120,7 +135,7 @@ fn restore_terminal() {
 }
 
 impl App {
-    async fn new(bus: Bus, me: UserId) -> Result<App> {
+    pub(crate) async fn new(bus: Bus, me: UserId) -> Result<App> {
         let mut app = App {
             bus,
             me,
@@ -313,10 +328,18 @@ impl App {
 
     // -- event loop -------------------------------------------------------
 
-    async fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-        let sub = self.bus.subscribe(Some(self.me), self.tags()).await?;
-        let mut sub = sub;
-        let mut input = spawn_input_reader();
+    /// Drive a session to completion. Returns the reason it ended, if the
+    /// server supplied one.
+    pub(crate) async fn event_loop<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+        events: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    ) -> Result<Option<String>>
+    where
+        B::Error: Send + Sync + 'static,
+    {
+        let mut sub = self.bus.subscribe(Some(self.me), self.tags()).await?;
+        let mut ended = None;
 
         loop {
             terminal.draw(|frame| render::draw(frame, self))?;
@@ -324,9 +347,16 @@ impl App {
                 break;
             }
             tokio::select! {
-                key = input.recv() => match key {
-                    Some(event) => self.on_terminal_event(event, &sub).await?,
-                    // The reader thread died; nothing more can arrive.
+                event = events.recv() => match event {
+                    Some(SessionEvent::Key(key)) => keys::handle(self, key, &sub).await?,
+                    // A redraw is all a resize needs: the backend reports the
+                    // new size and `draw` resizes the buffers to match.
+                    Some(SessionEvent::Resize) => {}
+                    Some(SessionEvent::Disconnect(reason)) => {
+                        ended = Some(reason);
+                        break;
+                    }
+                    // The input source is gone; nothing more can arrive.
                     None => break,
                 },
                 delivery = sub.recv() => match delivery {
@@ -336,21 +366,7 @@ impl App {
                 () = expire(self.flash_until) => self.flash_until = None,
             }
         }
-        Ok(())
-    }
-
-    async fn on_terminal_event(
-        &mut self,
-        event: crossterm::event::Event,
-        sub: &Subscription,
-    ) -> Result<()> {
-        use crossterm::event::Event;
-        match event {
-            Event::Key(key) => keys::handle(self, key, sub).await?,
-            Event::Resize(_, _) => {}
-            _ => {}
-        }
-        Ok(())
+        Ok(ended)
     }
 
     async fn on_delivery(&mut self, delivery: Delivery) -> Result<()> {
@@ -428,24 +444,26 @@ async fn expire(deadline: Option<std::time::Instant>) {
 
 /// crossterm's reader is blocking, so it lives on its own thread and feeds the
 /// async loop through a channel.
-fn spawn_input_reader() -> mpsc::UnboundedReceiver<crossterm::event::Event> {
-    let (tx, rx) = mpsc::unbounded_channel();
+fn spawn_input_reader(tx: mpsc::UnboundedSender<SessionEvent>) {
     std::thread::spawn(move || {
         loop {
-            match crossterm::event::read() {
-                Ok(event) => {
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
+            let event = match crossterm::event::read() {
+                Ok(event) => event,
                 Err(err) => {
                     tracing::error!(%err, "terminal input reader stopped");
                     break;
                 }
+            };
+            let event = match event {
+                crossterm::event::Event::Key(key) => SessionEvent::Key(key),
+                crossterm::event::Event::Resize(_, _) => SessionEvent::Resize,
+                _ => continue,
+            };
+            if tx.send(event).is_err() {
+                break;
             }
         }
     });
-    rx
 }
 
 /// Render one frame off-screen and return it as plain text.
